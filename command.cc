@@ -1,14 +1,4 @@
 
-/*
- * 
- *
- * Template file.
- * You will need to add more code here to execute the command table.
- *
- * NOTE: You are responsible for fixing any bugs this code may have!
- *
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -28,19 +18,117 @@
 #include "command.h"
 #include "tokenizer.h"
 
+static std::string removeQuotes(const std::string &s)
+{
+
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++)
+        if (s[i] != '"' && s[i] != '\'')
+            out += s[i];
+    return out;
+}
+
+static void setFile(char *&field, const std::string &name)
+{
+
+    free(field);
+    field = strdup(removeQuotes(name).c_str());
+}
+
+static bool isWord(TokenType t) { return t == TOKEN_COMMAND || t == TOKEN_ARGUMENT; }
 
 void parse(std::vector<Token> &tokens)
 {
-    Command currentCommand;
-    SimpleCommand *currentSimpleCommand = new SimpleCommand();
+    Command &cmd = Command::_currentCommand;
+    SimpleCommand *cur = new SimpleCommand();
+    const char *error = NULL;
 
-    currentCommand.execute();
-    /*
-      Implement this function 
-      you must parse for all possible tokens scenario
-      right now command.execute only print the format , you will inject it in your logic.
+    for (size_t i = 0; i < tokens.size() && !error; i++)
+    {
+        Token &t = tokens[i];
 
-    */
+        if (isWord(t.type))
+        {
+            cur->insertArgument(strdup(removeQuotes(t.value).c_str()));
+        }
+        else if (t.type == TOKEN_PIPE)
+        {
+            if (cur->_numberOfArguments == 0)
+                error = "missing command before '|'";
+            else
+            {
+                cmd.insertSimpleCommand(cur);
+                cur = new SimpleCommand();
+            }
+        }
+        else if (t.type == TOKEN_BACKGROUND)
+        {
+            if (tokens[i + 1].type != TOKEN_EOF)
+                error = "'&' must be at the end of the command";
+            else
+                cmd._background = 1;
+        }
+        else if (t.type != TOKEN_EOF)
+        {
+            if (!isWord(tokens[i + 1].type))
+            {
+                error = "missing file name after redirection";
+                break;
+            }
+            std::string file = tokens[++i].value;
+
+            if (t.type == TOKEN_REDIRECT)
+            {
+                setFile(cmd._outFile, file);
+                cmd._append = 0;
+            }
+            else if (t.type == TOKEN_APPEND)
+            {
+                setFile(cmd._outFile, file);
+                cmd._append = 1;
+            }
+            else if (t.type == TOKEN_INPUT)
+            {
+                setFile(cmd._inputFile, file);
+            }
+            else if (t.type == TOKEN_ERROR)
+            {
+                setFile(cmd._errFile, file);
+            }
+            else
+            {
+                setFile(cmd._outFile, file);
+                setFile(cmd._errFile, file);
+                cmd._out_error = 1;
+                cmd._append = 1;
+            }
+        }
+    }
+
+    if (!error)
+    {
+        if (cur->_numberOfArguments > 0)
+            cmd.insertSimpleCommand(cur);
+        else if (cmd._numberOfSimpleCommands > 0)
+            error = "missing command after '|'";
+        else if (cmd._outFile || cmd._inputFile || cmd._errFile || cmd._background)
+            error = "missing command";
+        else
+        {
+            freeSimpleCommand(cur);
+            return;
+        }
+    }
+
+    if (error)
+    {
+        fprintf(stderr, "myshell: syntax error: %s\n", error);
+        freeSimpleCommand(cur);
+        cmd.clear();
+        return;
+    }
+
+    cmd.execute();
 }
 
 SimpleCommand::SimpleCommand()
