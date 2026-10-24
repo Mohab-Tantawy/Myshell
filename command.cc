@@ -226,8 +226,215 @@ void Command::print()
            _background ? "YES" : "NO");
     printf("\n\n");
 }
-int main()
+static void logChild(pid_t pid)
 {
+    char line[64];
+    int n = snprintf(line, sizeof(line), "Child process %d terminated\n", (int)pid);
+    if (logFd >= 0)
+    {
+        ssize_t r = write(logFd, line, n);
+        (void)r;
+    }
+}
+
+static void onChildExit(int)
+{
+    int saved = errno;
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
+        logChild(pid);
+    errno = saved;
+}
+
+
+void Command::execute()
+{
+    print();
+
+    if (_numberOfSimpleCommands == 1)
+    {
+        char **args = _simpleCommands[0]->_arguments;
+
+        if (strcmp(args[0], "exit") == 0)
+        {
+            printf("Good bye!!\n");
+            exit(0);
+        }
+        if (strcmp(args[0], "cd") == 0)
+        {
+            const char *dir = args[1] ? args[1] : getenv("HOME");
+            if (dir == NULL || chdir(dir) != 0)
+                fprintf(stderr, "cd: %s: %s\n", dir ? dir : "(no HOME)", strerror(errno));
+            clear();
+            return;
+        }
+    }
+
+    int infd = -1, outfd = -1, errfd = -1;
+
+    if (_inputFile)
+    {
+        infd = open(_inputFile, O_RDONLY);
+        if (infd < 0)
+        {
+            fprintf(stderr, "myshell: %s: %s\n", _inputFile, strerror(errno));
+            clear();
+            return;
+        }
+    }
+    if (_outFile)
+    {
+        outfd = open(_outFile, O_WRONLY | O_CREAT | (_append ? O_APPEND : O_TRUNC), 0644);
+        if (outfd < 0)
+        {
+            fprintf(stderr, "myshell: %s: %s\n", _outFile, strerror(errno));
+            clear();
+            return;
+        }
+    }
+    if (_errFile)
+    {
+        if (_out_error)
+            errfd = dup(outfd);
+        else
+            errfd = open(_errFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (errfd < 0)
+        {
+            fprintf(stderr, "myshell: %s: %s\n", _errFile, strerror(errno));
+            clear();
+            return;
+        }
+    }
+
+    fflush(stdout);
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &block, &old);
+
+    std::vector<pid_t> pids;
+    int prevRead = -1;
+
+    for (int i = 0; i < _numberOfSimpleCommands; i++)
+    {
+        bool last = (i == _numberOfSimpleCommands - 1);
+        int fd[2] = {-1, -1};
+
+        if (!last && pipe(fd) < 0)
+        {
+            perror("myshell: pipe");
+            break;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            perror("myshell: fork");
+            break;
+        }
+
+        if (pid == 0)
+        {
+            sigprocmask(SIG_SETMASK, &old, NULL);
+            signal(SIGCHLD, SIG_DFL);
+            if (!_background)
+                signal(SIGINT, SIG_DFL);
+
+            if (i == 0 && infd >= 0)
+                dup2(infd, 0);
+            else if (i > 0)
+                dup2(prevRead, 0);
+
+            if (last && outfd >= 0)
+                dup2(outfd, 1);
+            else if (!last)
+                dup2(fd[1], 1);
+
+            if (errfd >= 0)
+                dup2(errfd, 2);
+
+            if (infd >= 0)
+                close(infd);
+            if (outfd >= 0)
+                close(outfd);
+            if (errfd >= 0)
+                close(errfd);
+            if (prevRead >= 0)
+                close(prevRead);
+            if (fd[0] >= 0)
+                close(fd[0]);
+            if (fd[1] >= 0)
+                close(fd[1]);
+
+            char **args = _simpleCommands[i]->_arguments;
+            execvp(args[0], args);
+
+            fprintf(stderr, "myshell: %s: command not found\n", args[0]);
+            _exit(127);
+        }
+
+        pids.push_back(pid);
+        if (prevRead >= 0)
+            close(prevRead);
+        if (fd[1] >= 0)
+            close(fd[1]);
+        prevRead = fd[0];
+    }
+
+    if (prevRead >= 0)
+        close(prevRead);
+    if (infd >= 0)
+        close(infd);
+    if (outfd >= 0)
+        close(outfd);
+    if (errfd >= 0)
+        close(errfd);
+
+    if (_background)
+    {
+        if (!pids.empty())
+            printf("[bg] %d\n", (int)pids.back());
+    }
+    else
+    {
+        for (size_t k = 0; k < pids.size(); k++)
+        {
+            int status;
+            if (waitpid(pids[k], &status, 0) > 0)
+                logChild(pids[k]);
+        }
+    }
+
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    clear();
+}
+
+void Command::prompt(){
+    std::string input;
+    while (true)
+    {
+        printf("myshell>");
+        fflush(stdout);
+
+        if (!std::getline(std::cin, input))
+        {
+            printf("\nGood bye!!\n");
+            break;
+        }
+        std::vector<Token> tokens = tokenize(input);
+        parse(tokens);
+    }
+}
+
+Command Command::_currentCommand;
+SimpleCommand *Command::_currentSimpleCommand;
+
+int main(){
+    signal(SIGINT, SIG_IGN);
+    signal(SIGCHLD, onChildExit);
+    logFd = open("myshell.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+
     Command::_currentCommand.prompt();
     return 0;
 }
